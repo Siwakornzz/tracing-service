@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686" # สำหรับเข้าถึง UI ของ Jaeger
+      - "14268:14268" # สำหรับรับ trace data
+    networks:
+      - jaeger-network
+
+  go-tracing-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5001:5001"
+    depends_on:
+      - jaeger
+    networks:
+      - jaeger-network
+
+networks:
+  jaeger-network:
+    driver: bridge
