@@ -1,2 +1,0 @@
-# tracing-service
-tracing-service

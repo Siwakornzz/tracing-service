@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"sync"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"go.opentelemetry.io/otel"
@@ -23,7 +24,7 @@ var (
 )
 
 func main() {
-	tp, err := setupTracerProvider("http://jaeger:14268/api/traces")
+	tp, err := setupTracerProvider("http://localhost:14268/api/traces")
 	if err != nil {
 		log.Fatalf("failed to setup TracerProvider: %v", err)
 	}
@@ -40,50 +41,52 @@ func main() {
 		}
 
 		traceID := fmt.Sprintf("%v", traceData["trace_id"])
-		parentSpanID := fmt.Sprintf("%v", traceData["parent_span_id"])
+		operation := fmt.Sprintf("%v", traceData["operation"])
 
-		log.Printf("🟡 Received Trace ID: %s, Parent Span ID: %s", traceID, parentSpanID)
+		var ctx context.Context
+		var parentSpan trace.Span
 
+		// 🟢 ถ้าหา Trace ID ไม่เจอ ให้สร้างใหม่
 		if traceID == "<nil>" || traceID == "" {
 			traceID = generateNewTraceID()
 			traceData["trace_id"] = traceID
 		}
 
-		var ctx context.Context
-		var parentSpan trace.Span
-
+		// 🟢 เช็คว่ามี Parent Trace ไหม?
 		root, exists := traceGroups.Load(traceID)
 		if exists {
 			parentSpan = root.(trace.Span)
 			ctx = trace.ContextWithSpan(context.Background(), parentSpan)
 		} else {
+			// 🟢 ถ้าไม่มี Parent → เป็น Root Span
 			ctx, parentSpan = tracer.Start(context.Background(), "RootTrace-"+traceID)
 			traceGroups.Store(traceID, parentSpan)
 		}
 
-		opts := []trace.SpanStartOption{}
-		if parentSpanID != "<nil>" && parentSpanID != "" {
-			spanID, err := trace.SpanIDFromHex(parentSpanID)
-			if err != nil {
-				log.Printf("Error parsing SpanID from hex: %v", err)
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid parent span ID"})
-			}
+		// 🕒 อ่าน Start Time & End Time จาก Request
+		startTime, _ := time.Parse(time.RFC3339, fmt.Sprintf("%v", traceData["start_time"]))
+		endTime, _ := time.Parse(time.RFC3339, fmt.Sprintf("%v", traceData["end_time"]))
 
-			opts = append(opts, trace.WithLinks(trace.Link{
-				SpanContext: trace.NewSpanContext(trace.SpanContextConfig{
-					TraceID: parentSpan.SpanContext().TraceID(),
-					SpanID:  spanID,
-					Remote:  true,
-				}),
-			}))
+		// 🟡 กำหนด Parent Span ให้ Context
+		if parentSpan.SpanContext().IsValid() {
+			ctx = trace.ContextWithSpan(ctx, parentSpan)
 		}
 
-		_, span := tracer.Start(ctx, fmt.Sprintf("%v", traceData["operation"]), opts...)
-		defer span.End()
+		// 🟡 Start Child Span
+		opts := []trace.SpanStartOption{
+			trace.WithTimestamp(startTime),
+		}
 
+		_, span := tracer.Start(ctx, operation, opts...)
+		defer span.End(trace.WithTimestamp(endTime))
+
+		// 📌 Set Attributes ของ Span
 		for key, value := range traceData {
 			span.SetAttributes(attribute.String(key, fmt.Sprintf("%v", value)))
 		}
+
+		// ✅ เก็บ Parent Span ไว้ เพื่อให้ Request ถัดไปใช้
+		traceGroups.Store(traceID, span)
 
 		return c.JSON(fiber.Map{
 			"status":   "traced!",
@@ -118,10 +121,4 @@ func generateNewTraceID() string {
 	tid := trace.TraceID{}
 	rand.Read(tid[:])
 	return tid.String()
-}
-
-func generateNewSpanID() string {
-	sid := trace.SpanID{}
-	rand.Read(sid[:])
-	return sid.String()
 }
