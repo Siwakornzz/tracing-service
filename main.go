@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/jaeger"
@@ -20,85 +20,119 @@ import (
 
 var (
 	tracer      trace.Tracer
-	traceGroups sync.Map
+	traceGroups sync.Map // เก็บ trace_id และ spans
 )
 
 func main() {
-	tp, err := setupTracerProvider("http://jaeger:14268/api/traces")
+	tp, err := setupTracerProvider("http://localhost:14268/api/traces")
 	if err != nil {
 		log.Fatalf("failed to setup TracerProvider: %v", err)
 	}
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	tracer = tp.Tracer("tracing-service")
-
 	app := fiber.New()
 
-	app.Post("/trace", func(c *fiber.Ctx) error {
+	app.Post("/start-trace", func(c *fiber.Ctx) error {
+		traceData := make(map[string]interface{})
+		if err := c.BodyParser(&traceData); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		operation := fmt.Sprintf("%v", traceData["operation"])
+		message := fmt.Sprintf("%v", traceData["message"])
+		startTime, _ := time.Parse(time.RFC3339, fmt.Sprintf("%v", traceData["start_time"]))
+
+		// สร้าง trace_id ใหม่
+		traceID := uuid.New().String() // สร้าง trace_id ใหม่
+
+		// สร้าง Root Span
+		ctx := context.Background()
+		_, span := tracer.Start(ctx, operation, trace.WithTimestamp(startTime))
+
+		span.SetAttributes(attribute.String("message", message))
+
+		spanID := span.SpanContext().SpanID().String() // ดึง span_id
+		traceGroups.Store(spanID, span)                // เก็บ spanID ของ A
+
+		log.Println("[Start] Span ID:", spanID)
+		log.Println("[Start] traceID ID:", traceID)
+
+		// ส่ง trace_id กลับไปพร้อม span_id
+		return c.JSON(fiber.Map{
+			"status":   "trace started",
+			"trace_id": traceID, // ส่ง trace_id ที่สร้างใหม่
+			"span_id":  spanID,
+		})
+	})
+
+	// Add a new span (Child Span)
+	app.Post("/add-trace", func(c *fiber.Ctx) error {
 		traceData := make(map[string]interface{})
 		if err := c.BodyParser(&traceData); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 
 		traceID := fmt.Sprintf("%v", traceData["trace_id"])
+		parentSpanID := fmt.Sprintf("%v", traceData["parent_span_id"]) // ✅ ใช้ parent span ID
 		operation := fmt.Sprintf("%v", traceData["operation"])
-
-		var ctx context.Context
-		var parentSpan trace.Span
-
-		// 🟢 ถ้าหา Trace ID ไม่เจอ ให้สร้างใหม่
-		if traceID == "<nil>" || traceID == "" {
-			traceID = generateNewTraceID()
-			traceData["trace_id"] = traceID
-		}
-
-		// 🟢 เช็คว่ามี Parent Trace ไหม?
-		root, exists := traceGroups.Load(traceID)
-		if exists {
-			parentSpan = root.(trace.Span)
-			ctx = trace.ContextWithSpan(context.Background(), parentSpan)
-		} else {
-			// 🟢 ถ้าไม่มี Parent → เป็น Root Span
-			ctx, parentSpan = tracer.Start(context.Background(), "RootTrace-"+traceID)
-			traceGroups.Store(traceID, parentSpan)
-		}
-
-		// 🕒 อ่าน Start Time & End Time จาก Request
 		startTime, _ := time.Parse(time.RFC3339, fmt.Sprintf("%v", traceData["start_time"]))
-		endTime, _ := time.Parse(time.RFC3339, fmt.Sprintf("%v", traceData["end_time"]))
+		message := fmt.Sprintf("%v", traceData["message"]) // เอา message มาจาก input
 
-		// 🟡 กำหนด Parent Span ให้ Context
-		if parentSpan.SpanContext().IsValid() {
-			ctx = trace.ContextWithSpan(ctx, parentSpan)
+		// ✅ หาว่า parent span อยู่ที่ไหน
+		parentSpan, exists := traceGroups.Load(parentSpanID)
+		if !exists {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "parent_span_id not found"})
 		}
 
-		// 🟡 Start Child Span
-		opts := []trace.SpanStartOption{
-			trace.WithTimestamp(startTime),
-		}
+		// ✅ ใช้ parent span เป็น context
+		ctx := trace.ContextWithSpan(context.Background(), parentSpan.(trace.Span))
+		_, childSpan := tracer.Start(ctx, operation, trace.WithTimestamp(startTime))
 
-		_, span := tracer.Start(ctx, operation, opts...)
-		defer span.End(trace.WithTimestamp(endTime))
+		childSpan.SetAttributes(attribute.String("message", message)) // ใส่ message เป็น tag
 
-		// 📌 Set Attributes ของ Span
-		for key, value := range traceData {
-			span.SetAttributes(attribute.String(key, fmt.Sprintf("%v", value)))
-		}
+		traceGroups.Store(childSpan.SpanContext().SpanID().String(), childSpan)
 
-		// ✅ เก็บ Parent Span ไว้ เพื่อให้ Request ถัดไปใช้
-		traceGroups.Store(traceID, span)
+		spandId := childSpan.SpanContext().SpanID().String()
+
+		log.Println("[ADD] Span ID:", spandId)
+		log.Println("[ADD] traceID ID:", traceID)
 
 		return c.JSON(fiber.Map{
-			"status":   "traced!",
+			"status":   "span added",
 			"trace_id": traceID,
-			"span_id":  span.SpanContext().SpanID().String(),
+			"span_id":  spandId,
 		})
+	})
+
+	// Stop a span
+	app.Post("/stop-trace", func(c *fiber.Ctx) error {
+		traceData := make(map[string]interface{})
+		if err := c.BodyParser(&traceData); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		spanID := fmt.Sprintf("%v", traceData["span_id"])
+		endTime, _ := time.Parse(time.RFC3339, fmt.Sprintf("%v", traceData["end_time"]))
+
+		span, exists := traceGroups.Load(spanID)
+		if !exists {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "span_id not found"})
+		}
+
+		span.(trace.Span).End(trace.WithTimestamp(endTime))
+		traceGroups.Delete(spanID) // ลบ span ออกจาก memory
+
+		log.Println("[STOP] Span ID:", spanID)
+
+		return c.JSON(fiber.Map{"status": "span stopped", "span_id": spanID})
 	})
 
 	log.Println("🚀 Tracing Service started at :5001")
 	log.Fatal(app.Listen(":5001"))
 }
 
+// ตั้งค่า Tracer Provider
 func setupTracerProvider(jaegerURL string) (*sdktrace.TracerProvider, error) {
 	exp, err := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(jaegerURL)))
 	if err != nil {
@@ -115,10 +149,4 @@ func setupTracerProvider(jaegerURL string) (*sdktrace.TracerProvider, error) {
 
 	otel.SetTracerProvider(tp)
 	return tp, nil
-}
-
-func generateNewTraceID() string {
-	tid := trace.TraceID{}
-	rand.Read(tid[:])
-	return tid.String()
 }
