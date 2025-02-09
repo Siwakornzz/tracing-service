@@ -15,79 +15,68 @@ app.get("/test-trace", async (req, res) => {
   try {
     console.log("🚀 Start tracing process...");
 
-    let startTime = new Date().toISOString(); // เริ่มจับเวลา
-
+    let startTime = new Date().toISOString();
     await delay(500);
-
     let endTime = new Date().toISOString();
 
-    // 🟢 STEP 1: เริ่มสร้าง User และส่ง Trace ID ใหม่ไปที่ Tracing Service
-    const traceResponse = await axios.post("http://localhost:5001/trace", {
-      service: "nodejs-app",
-      operation: "create-user",
-      message: `Creating user ${username}`,
-      start_time: startTime, // ส่งเวลาเริ่ม
-      end_time: endTime, // ส่งเวลาสิ้นสุด
-    });
+    // Start Root Trace
+    const traceResponse = await axios.post(
+      "http://localhost:5001/start-trace",
+      {
+        service: "nodejs-app",
+        operation: "create-user",
+        message: `Creating user ${username}`,
+        start_time: startTime,
+      }
+    );
 
-    const traceID = traceResponse.data.trace_id; // รับ Trace ID กลับมา
+    const traceID = traceResponse.data.trace_id;
+    const parentSpanID = traceResponse.data.span_id;
     console.log(`🟢 Trace ID: ${traceID}`);
 
-    startTime = new Date().toISOString(); // เริ่มจับเวลา
-
-    // ⏳ หน่วงเวลา 500ms เพื่อจำลองกระบวนการสร้าง User
+    // Nested: Insert into Database
+    startTime = new Date().toISOString();
     await delay(500);
-
     endTime = new Date().toISOString();
-
-    // 🟢 STEP 2: เพิ่มข้อมูล User ลงใน Database
-    console.log("🟡 Inserting data into database...");
-    await axios.post("http://localhost:5001/trace", {
-      trace_id: traceID, // ใช้ Trace ID เดิม
+    const dbResponse = await axios.post("http://localhost:5001/add-trace", {
+      trace_id: traceID,
+      parent_span_id: parentSpanID,
       service: "nodejs-app",
       operation: "database-insert",
       message: `Inserting user data for ${username}`,
-      start_time: startTime, // ส่งเวลาเริ่ม
-      end_time: endTime, // ส่งเวลาสิ้นสุด
+      start_time: startTime,
     });
+    const dbSpanID = dbResponse.data.span_id;
 
-    startTime = new Date().toISOString(); // เริ่มจับเวลา
-
-    // ⏳ หน่วงเวลา 700ms จำลองการ INSERT ข้อมูล
-    await delay(5000);
-
-    // 🟢 STEP 3: ส่งอีเมลยืนยันการสมัครสมาชิก
-    console.log("🟡 Sending confirmation email...");
-
+    // Nested: Send Confirmation Email
+    startTime = new Date().toISOString();
+    await delay(700);
     endTime = new Date().toISOString();
-
-    await axios.post("http://localhost:5001/trace", {
-      trace_id: traceID, // ใช้ Trace ID เดิม
+    const emailResponse = await axios.post("http://localhost:5001/add-trace", {
+      trace_id: traceID,
+      parent_span_id: dbSpanID,
       service: "nodejs-app",
       operation: "send-confirmation",
       message: `Sending confirmation email to ${email}`,
-      start_time: startTime, // ส่งเวลาเริ่ม
-      end_time: endTime, // ส่งเวลาสิ้นสุด
+      start_time: startTime,
     });
+    const emailSpanID = emailResponse.data.span_id;
 
-    startTime = new Date().toISOString(); // เริ่มจับเวลา
-
-    // ⏳ หน่วงเวลา 300ms จำลองการแจ้งเตือน
-    await delay(30000);
-
-    endTime = new Date().toISOString();
+    // Stop spans
+    await axios.post("http://localhost:5001/stop-trace", {
+      span_id: emailSpanID,
+      end_time: new Date().toISOString(),
+    });
+    await axios.post("http://localhost:5001/stop-trace", {
+      span_id: dbSpanID,
+      end_time: new Date().toISOString(),
+    });
+    await axios.post("http://localhost:5001/stop-trace", {
+      span_id: parentSpanID,
+      end_time: new Date().toISOString(),
+    });
 
     console.log("✅ User created successfully!");
-
-    await axios.post("http://localhost:5001/trace", {
-      trace_id: traceID, // ใช้ Trace ID เดิม
-      service: "nodejs-app",
-      operation: "show user created successfully",
-      message: ` User created successfully! ${email} ${username}`,
-      start_time: startTime, // ส่งเวลาเริ่ม
-      end_time: endTime, // ส่งเวลาสิ้นสุด
-    });
-
     res.json({ message: "User created successfully!", trace_id: traceID });
   } catch (error) {
     console.error("❌ Error sending trace:", error);

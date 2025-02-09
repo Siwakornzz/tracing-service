@@ -24,7 +24,7 @@ var (
 )
 
 func main() {
-	tp, err := setupTracerProvider("http://localhost:14268/api/traces")
+	tp, err := setupTracerProvider("http://jaeger:14268/api/traces")
 	if err != nil {
 		log.Fatalf("failed to setup TracerProvider: %v", err)
 	}
